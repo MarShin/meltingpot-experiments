@@ -41,7 +41,7 @@ def parse_args():
         help="weather to capture videos of the agent performances (check out `videos` folder)")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="commons_harvest__open",
+    parser.add_argument("--env-id", type=str, default="allelopathic_harvest__open",
         help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=500000, # probably 2MM at least
         help="total timesteps of the experiments")
@@ -214,7 +214,8 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs = torch.Tensor(envs.reset()).to(device)
+    _obs, _ = envs.reset(seed=args.seed)
+    next_obs = torch.Tensor(_obs).to(device)
     next_done = torch.zeros(args.num_envs * num_agents).to(device)
     num_updates = args.total_timesteps // args.batch_size
     print(
