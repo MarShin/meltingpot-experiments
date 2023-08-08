@@ -47,7 +47,7 @@ def parse_args():
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--num-envs", type=int, default=1,
+    parser.add_argument("--num-envs", type=int, default=16,
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=512, # 1000 rollout_len in sb3_train
         help="the number of steps to run in each environment per policy rollout")
@@ -89,6 +89,13 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+
+def unbatchify(x, env):
+    """Converts np array to PZ style arguments."""
+    x = x.cpu().numpy()
+    x = {f"player_{i}": x[i] for i in range(num_agents)}
+    return x
 
 
 class Agent(nn.Module):
@@ -175,7 +182,8 @@ if __name__ == "__main__":
     env = ss.pettingzoo_env_to_vec_env_v1(env)
     envs = ss.concat_vec_envs_v1(
         env,
-        num_vec_envs=args.num_envs,  # number of parallel multi-agent environments
+        num_vec_envs=args.num_envs
+        // num_agents,  # number of parallel multi-agent environments
         num_cpus=0,
         base_class="gymnasium",
     )
@@ -183,7 +191,7 @@ if __name__ == "__main__":
     envs.single_action_space = envs.action_space
     envs.is_vector_env = True
     envs = gym.wrappers.RecordEpisodeStatistics(envs)
-    envs = RecordMultiagentEpisodeStatistics(envs, args.num_steps)
+    # envs = RecordMultiagentEpisodeStatistics(envs, args.num_steps)
 
     if args.capture_video:
         envs = gym.wrappers.RecordVideo(envs, f"videos/{run_name}")
@@ -196,13 +204,13 @@ if __name__ == "__main__":
     print(agent)
 
     # ALGO logic: Storage setup
-    # (512, 1*16, 88, 88, 28)
+    # (512, 16, 88, 88, 28)
     obs = torch.zeros(
         # (args.num_steps, args.num_envs)
         (args.num_steps, args.num_envs * num_agents)
         + envs.single_observation_space.shape
     ).to(device)
-    # (512, 1*16, 1)
+    # (512, 16)
     actions = torch.zeros(
         (args.num_steps, args.num_envs * num_agents) + envs.single_action_space.shape
     ).to(device)
@@ -222,9 +230,6 @@ if __name__ == "__main__":
         f"num_updates = total_timesteps / batch_size: {args.total_timesteps} / {args.batch_size} = {num_updates}"
     )
     print("next_obs shape:", next_obs.shape)
-    print()
-    print("agent.get_action_and_value(next_obs)", agent.get_action_and_value(next_obs))
-    # action (16, 1); log_prob (16, 1); entropy (16, 1); value (16, 1)
 
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so
@@ -246,16 +251,13 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data
-            next_obs, reward, done, info = envs.step(action.cpu().numpy())
+            next_obs, reward, terminations, truncations, info = envs.step(
+                unbatchify(action, envs)
+            )
             rewards[step] = torch.tensor(reward).to(device).view(-1)  # (16, )
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(
                 done
             ).to(device)
-
-            # print("reward: ", reward)
-            # print("done: ", done)
-            # print("info: ", info)
-            # print()
 
             for idx, item in enumerate(info):
                 player_idx = idx % num_agents
@@ -312,37 +314,22 @@ if __name__ == "__main__":
         # bootstrap value if not done - REVISIT CODE
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
-            if args.gae:
-                advantages = torch.zeros_like(rewards).to(device)
-                lastgaelam = 0
-                for t in reversed(range(args.num_steps)):
-                    if t == args.num_steps - 1:
-                        nextnonterminal = 1.0 - next_done
-                        nextvalues = next_value
-                    else:
-                        nextnonterminal = 1.0 - dones[t + 1]
-                        nextvalues = values[t + 1]
-                    delta = (
-                        rewards[t]
-                        + args.gamma * nextvalues * nextnonterminal
-                        - values[t]
-                    )
-                    advantages[t] = lastgaelam = (
-                        delta
-                        + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-                    )
-                returns = advantages + values
-            else:
-                returns = torch.zeros_like(rewards).to(device)
-                for t in reversed(range(args.num_steps)):
-                    if t == args.num_steps - 1:
-                        nextnonterminal = 1.0 - next_done
-                        next_return = next_value
-                    else:
-                        nextnonterminal = 1.0 - dones[t + 1]
-                        next_return = returns[t + 1]
-                    returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
-                advantages = returns - values
+            advantages = torch.zeros_like(rewards).to(device)
+            lastgaelam = 0
+            for t in reversed(range(args.num_steps)):
+                if t == args.num_steps - 1:
+                    nextnonterminal = 1.0 - next_done
+                    nextvalues = next_value
+                else:
+                    nextnonterminal = 1.0 - dones[t + 1]
+                    nextvalues = values[t + 1]
+                delta = (
+                    rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                )
+                advantages[t] = lastgaelam = (
+                    delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                )
+            returns = advantages + values
 
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
@@ -435,5 +422,5 @@ if __name__ == "__main__":
             "charts/SPS", int(global_step / (time.time() - start_time)), global_step
         )
 
-    env.close()
+    envs.close()
     writer.close()
