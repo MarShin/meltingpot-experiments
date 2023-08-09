@@ -39,6 +39,9 @@ def raw_env(env_config, max_cycles=MAX_CYCLES):
 
 
 def env(env_config, max_cycles=MAX_CYCLES):
+    print("###############")
+    print("pettingzoo.utils.env() is called finally")
+    print("###############")
     aec_env = raw_env(env_config, max_cycles)
     aec_env = wrappers.AssertOutOfBoundsWrapper(aec_env)
     aec_env = wrappers.OrderEnforcingWrapper(aec_env)

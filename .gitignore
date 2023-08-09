@@ -29,3 +29,5 @@ __pycache__/
 # Saved models.
 /results/
 /meltingpot/assets/
+*/runs/
+/reference/

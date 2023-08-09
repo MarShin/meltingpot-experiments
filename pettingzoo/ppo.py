@@ -47,7 +47,7 @@ def parse_args():
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--num-envs", type=int, default=16,
+    parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=512, # 1000 rollout_len in sb3_train
         help="the number of steps to run in each environment per policy rollout")
@@ -176,21 +176,18 @@ if __name__ == "__main__":
     num_agents = env.max_num_agents
     env = ss.observation_lambda_v0(env, lambda x, _: x["RGB"], lambda s: s["RGB"])
     env = ss.frame_stack_v1(env, 4)
-    env = ss.agent_indicator_v0(
-        env, type_only=False
-    )  # not added in demo code but most likely useful
+    env = ss.agent_indicator_v0(env, type_only=False)
     env = ss.pettingzoo_env_to_vec_env_v1(env)
     envs = ss.concat_vec_envs_v1(
         env,
-        num_vec_envs=args.num_envs
-        // num_agents,  # number of parallel multi-agent environments
+        num_vec_envs=args.num_envs,  # number of parallel multi-agent environments
         num_cpus=0,
         base_class="gymnasium",
     )
     envs.single_observation_space = envs.observation_space
     envs.single_action_space = envs.action_space
     envs.is_vector_env = True
-    envs = gym.wrappers.RecordEpisodeStatistics(envs)
+    # envs = gym.wrappers.RecordEpisodeStatistics(envs)
     # envs = RecordMultiagentEpisodeStatistics(envs, args.num_steps)
 
     if args.capture_video:
@@ -252,7 +249,8 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data
             next_obs, reward, terminations, truncations, info = envs.step(
-                unbatchify(action, envs)
+                action.cpu().numpy()
+                # unbatchify(action, envs)
             )
             rewards[step] = torch.tensor(reward).to(device).view(-1)  # (16, )
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(
