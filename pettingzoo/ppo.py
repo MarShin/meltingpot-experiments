@@ -47,7 +47,7 @@ def parse_args():
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--num-envs", type=int, default=1,
+    parser.add_argument("--num-envs", type=int, default=1, # must be multiples of the num_agents in the env.
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=512, # 1000 rollout_len in sb3_train
         help="the number of steps to run in each environment per policy rollout")
@@ -89,13 +89,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
-
-
-def unbatchify(x, env):
-    """Converts np array to PZ style arguments."""
-    x = x.cpu().numpy()
-    x = {f"player_{i}": x[i] for i in range(num_agents)}
-    return x
 
 
 class Agent(nn.Module):
@@ -213,15 +206,17 @@ if __name__ == "__main__":
     ).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
-    dones = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
+    terminations = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
+    truncations = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    _obs, _ = envs.reset(seed=args.seed)
+    _obs, _info = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(_obs).to(device)
-    next_done = torch.zeros(args.num_envs * num_agents).to(device)
+    next_termination = torch.zeros(args.num_envs * num_agents).to(device)
+    next_truncation = torch.zeros(args.num_envs * num_agents).to(device)
     num_updates = args.total_timesteps // args.batch_size
     print(
         f"num_updates = total_timesteps / batch_size: {args.total_timesteps} / {args.batch_size} = {num_updates}"
@@ -238,7 +233,8 @@ if __name__ == "__main__":
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs
             obs[step] = next_obs
-            dones[step] = next_done
+            terminations[step] = next_termination
+            truncations[step] = next_truncation
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
@@ -248,14 +244,15 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data
-            next_obs, reward, terminations, truncations, info = envs.step(
+            next_obs, reward, termination, truncation, info = envs.step(
                 action.cpu().numpy()
-                # unbatchify(action, envs)
             )
             rewards[step] = torch.tensor(reward).to(device).view(-1)  # (16, )
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(
-                done
-            ).to(device)
+            next_obs, next_termination, next_truncation = (
+                torch.Tensor(next_obs).to(device),
+                torch.Tensor(termination).to(device),
+                torch.Tensor(truncation).to(device),
+            )
 
             for idx, item in enumerate(info):
                 player_idx = idx % num_agents
@@ -314,6 +311,8 @@ if __name__ == "__main__":
             next_value = agent.get_value(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
+            next_done = torch.maximum(next_termination, next_truncation)
+            dones = torch.maximum(terminations, truncations)
             for t in reversed(range(args.num_steps)):
                 if t == args.num_steps - 1:
                     nextnonterminal = 1.0 - next_done
@@ -387,6 +386,7 @@ if __name__ == "__main__":
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + args.vf_coef * v_loss
 
