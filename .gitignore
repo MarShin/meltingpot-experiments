@@ -26,8 +26,7 @@ __pycache__/
 
 .vscode/
 
-# Saved models.
+# exp runs
 results/
-/meltingpot/assets/
 runs/
-/reference/
+reference/
