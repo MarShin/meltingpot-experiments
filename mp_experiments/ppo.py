@@ -24,12 +24,11 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, agent_id):
         super().__init__()
+        # 1 frame
         self.network = nn.Sequential(
-            # if intput is Linear layer: np.array(envs.single_observation_space.shape).prod()
-            # 28 = 4 frames * 3 RGB channels + 16 agent indicator
-            layer_init(nn.Conv2d(28, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
@@ -43,23 +42,81 @@ class Agent(nn.Module):
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def get_value(self, x):
-        # x here is obs: (16, 88, 88, 28)
-        x = x.clone()
-        # Convert to tensor, rescale to [0, 1], and convert from
-        # 3 rgb channels * 4 stack frames, rest are agent_indicator
-        x[:, :, :, :12] /= 255.0
+        # x here is obs: (88, 88, 3)
+        # Convert to tensor, rescale to [0, 1]
+        x = (x - 10.0) / (255.0 - 10.0)
         #   B x H x W x C to B x C x H x W
-        return self.critic(self.network(x.permute(0, 3, 1, 2)))
+        return self.critic(self.network(x.permute((2, 0, 1)).unsqueeze(0)))
 
     def get_action_and_value(self, x, action=None):
-        x = x.clone()
-        x[:, :, :, :12] /= 255.0
-        hidden = self.network(x.permute((0, 3, 1, 2)))
+        # x here is [88, 88, 3]
+        x = (x - 10.0) / (255.0 - 10.0)
+        hidden = self.network(x.permute((2, 0, 1)).unsqueeze(0))
         logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+
+
+class MultiAgents(nn.Module):
+    def __init__(self, envs):
+        super().__init__()
+        self.num_agents = envs.max_num_agents
+        # 1 frame
+        self.networks = nn.ModuleList(
+            Agent(envs, agent_id).to(device) for agent_id in range(self.num_agents)
+        )
+
+    def get_values(self, x):
+        # x herer is obs: (16, 88, 88, 3)
+        values = np.stack(
+            [[self.networks[a].get_value(x[a])] for a in range(self.num_agents)], axis=0
+        )
+        return values
+
+    def get_actions_and_values(self, x, actions=None):
+        # x herer is obs: (16, 88, 88, 3)
+        actions, log_probs, entropies, values = [], [], [], []
+        for a in range(self.num_agents):
+            action, log_prob, entropy, value = self.networks[a].get_action_and_value(
+                x[a]
+            )
+            actions.append(action)
+            log_probs.append(log_prob)
+            entropies.append(entropy)
+            values.append(value)
+        actions = torch.cat(actions, dim=0)
+        log_probs = torch.cat(log_probs, dim=0)
+        entropies = torch.cat(entropies, dim=0)
+        values = torch.cat(values, dim=0)
+        return actions, log_probs, entropies, values
+
+
+def batchify_obs(obs, obs_key, device):
+    """Converts PZ style observations to batch of torch arrays."""
+    # convert to list of np arrays; output (num_agents, env.single_observation_space)
+    obs = np.stack([obs[a][obs_key] for a in obs], axis=0)
+    obs = torch.tensor(obs).to(device)
+    return obs
+
+
+def batchify(x, device):
+    """Converts PZ style returns to batch of torch arrays."""
+    # convert to list of np arrays
+    x = np.stack([x[a] for a in x], axis=0)
+    # convert to torch
+    x = torch.tensor(x).to(device)
+
+    return x
+
+
+def unbatchify(x, env):
+    """Converts np array to PZ style arguments."""
+    x = x.cpu().numpy()
+    x = {a: x[i] for i, a in enumerate(env.possible_agents)}
+
+    return x
 
 
 if __name__ == "__main__":
@@ -91,74 +148,53 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     # run on M2 chip for development; cuda for training
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "mps")
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # env setup
-    # env_config = substrate.get_config(args.env_id)
-    # env = utils.parallel_env(
-    #     max_cycles=args.num_steps,
-    #     env_config=env_config,
-    # )
+    # ENV setup
     envs = MeltingPotCompatibilityV0(
         substrate_name=args.env_id, render_mode="rgb_array"
     )
     num_agents = envs.max_num_agents
-    # env = ss.observation_lambda_v0(env, lambda x, _: x["RGB"], lambda s: s["RGB"])
-    # env = ss.frame_stack_v1(env, 4)
-    # env = ss.agent_indicator_v0(env, type_only=False)
-    # env = ss.pettingzoo_env_to_vec_env_v1(env)
-    # envs = ss.concat_vec_envs_v1(
-    #     env,
-    #     num_vec_envs=args.num_envs,  # number of parallel multi-agent environments
-    #     num_cpus=0,
-    #     base_class="gymnasium",
-    # )
-    envs.single_observation_space = envs.observation_space
-    envs.single_action_space = envs.action_space
-    # envs.is_vector_env = True
-
+    # all agents have the same obs & action space in substrates we run on
+    envs.single_observation_space = envs.observation_space(0)["RGB"]
+    envs.single_action_space = envs.action_space(0)
     # envs = gym.wrappers.RecordEpisodeStatistics(envs)
     # envs = RecordMultiagentEpisodeStatistics(envs, args.num_steps)
 
     if args.capture_video:
         envs = gym.wrappers.RecordVideo(envs, f"videos/{run_name}")
-    assert isinstance(
-        envs.single_action_space, gym.spaces.Discrete
-    ), "only discrete action space is supported"
 
-    agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-    print(agent)
+    agents = MultiAgents(envs).to(device)
+    optimizer = optim.Adam(agents.parameters(), lr=args.learning_rate, eps=1e-5)
+    print(agents)
 
     # ALGO logic: Storage setup
-    # (512, 16, 88, 88, 28)
+    # remove all num_envs dimension as not considering vec_env for now
+    # (512, 16, 88, 88, 3)
     obs = torch.zeros(
-        # (args.num_steps, args.num_envs)
-        (args.num_steps, args.num_envs * num_agents)
-        + envs.single_observation_space.shape
+        (args.num_steps, num_agents) + envs.single_observation_space.shape
     ).to(device)
-    # (512, 16)
     actions = torch.zeros(
-        (args.num_steps, args.num_envs * num_agents) + envs.single_action_space.shape
+        (args.num_steps, num_agents) + envs.single_action_space.shape
     ).to(device)
-    logprobs = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
-    rewards = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
-    terminations = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
-    truncations = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
-    values = torch.zeros((args.num_steps, args.num_envs * num_agents)).to(device)
+    logprobs = torch.zeros((args.num_steps, num_agents)).to(device)
+    rewards = torch.zeros((args.num_steps, num_agents)).to(device)
+    terminations = torch.zeros((args.num_steps, num_agents)).to(device)
+    truncations = torch.zeros((args.num_steps, num_agents)).to(device)
+    values = torch.zeros((args.num_steps, num_agents)).to(device)
 
-    # TRY NOT TO MODIFY: start the game
+    # TRAINING LOOP
     global_step = 0
     start_time = time.time()
-    _obs, _info = envs.reset()  # seeding not need as Melting Pot is non-determistic
-    next_obs = torch.Tensor(_obs).to(device)
-    next_termination = torch.zeros(args.num_envs * num_agents).to(device)
-    next_truncation = torch.zeros(args.num_envs * num_agents).to(device)
+    next_obs, _info = envs.reset()  # seeding not need as Melting Pot is non-determistic
+    # TODO: need other obs as well
+    next_obs = batchify_obs(next_obs, "RGB", device)
+    next_termination = torch.zeros(num_agents).to(device)
+    next_truncation = torch.zeros(num_agents).to(device)
     num_updates = args.total_timesteps // args.batch_size
     print(
         f"num_updates = total_timesteps / batch_size: {args.total_timesteps} / {args.batch_size} = {num_updates}"
     )
-    print("next_obs shape:", next_obs.shape)
 
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so
@@ -168,28 +204,27 @@ if __name__ == "__main__":
             optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
-            global_step += 1 * args.num_envs
+            global_step += 1
             obs[step] = next_obs
             terminations[step] = next_termination
             truncations[step] = next_truncation
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value = agents.get_actions_and_values(next_obs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data
             next_obs, reward, termination, truncation, info = envs.step(
-                action.cpu().numpy()
+                unbatchify(action, envs)
             )
-            rewards[step] = torch.tensor(reward).to(device).view(-1)  # (16, )
-            next_obs, next_termination, next_truncation = (
-                torch.Tensor(next_obs).to(device),
-                torch.Tensor(termination).to(device),
-                torch.Tensor(truncation).to(device),
-            )
+            # rewards[step] = torch.tensor(reward).to(device).view(-1)  # (16, )
+            rewards[step] = batchify(reward, device)
+            next_termination = batchify(termination, device)
+            next_truncation = batchify(truncation, device)
+            next_obs = batchify_obs(next_obs, "RGB", device)
 
             for idx, item in enumerate(info):
                 player_idx = idx % num_agents
@@ -203,7 +238,7 @@ if __name__ == "__main__":
                         global_step,
                     )
 
-            # episode-wide info - overhead, each tuple in list contains same info
+            # TODO: episode-wide info - modify MA_episode_stats wrapper then update this
             if "ma_episode" in info[0].keys():
                 print(
                     f"global_step={global_step}, multiagent-max_length={info[0]['ma_episode']['l']}"
@@ -240,7 +275,7 @@ if __name__ == "__main__":
 
         # bootstrap value if not done - REVISIT CODE
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            next_value = agents.get_values(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             next_done = torch.maximum(next_termination, next_truncation)

@@ -1,6 +1,6 @@
 # absl_py
 dm_env
-dm_meltingpot
+dm_meltingpot==2.2.0
 dm_tree
 dmlab2d
 gymnasium
@@ -11,7 +11,7 @@ pettingzoo>=1.22.3
 # ray[rllib,default]>=2.5.0
 # stable_baselines3>=2.0.0
 # supersuit>=3.7.2
-torch
+torch==2.0.1
 shimmy
 wandb
 moviepy

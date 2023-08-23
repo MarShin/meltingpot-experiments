@@ -4,14 +4,14 @@ Attempt to replicate some of the research work in Multi-Agent Reinforcement Lear
 
 Progresss so far:
 
-- PPO+LSTM with Classifier Norm Model (CNM) on Melting Pot 1.0
-- 4 social outcome metrics
+- PPO+LSTM with Classifier Norm Model (CNM)[4] with parameter sharing on Melting Pot 1.0
+- 4 social outcome metrics env wrapper
 
 see my [Weights and Biases report](https://wandb.ai/marshin/Meltingpot/reports/Meltingpot-initial-trials--VmlldzoyNTIxMDg5) for more details
 
 Current progres:
 
-- Replicate Model Other Agent (MOA) from [3] on Melting Pot 2.0
+- Replicate Model Other Agent (MOA)[3] with no param sharing on Melting Pot 2.0
 
 ## Relevant papers
 
