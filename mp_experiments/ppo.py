@@ -10,6 +10,7 @@ from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 from shimmy import MeltingPotCompatibilityV0
 from default_args import parse_args
+import supersuit as ss
 
 # from record_ma_episode_statistics import (
 #     RecordMultiagentEpisodeStatistics,
@@ -59,9 +60,9 @@ class Agent(nn.Module):
 
 
 class MultiAgents(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, num_agents):
         super().__init__()
-        self.num_agents = envs.max_num_agents
+        self.num_agents = num_agents
         # 1 frame
         self.networks = nn.ModuleList(
             Agent(envs, agent_id).to(device) for agent_id in range(self.num_agents)
@@ -115,7 +116,6 @@ def batchify(x, device):
     x = np.stack([x[a] for a in x], axis=0, dtype=np.float32)
     # convert to torch
     x = torch.tensor(x).to(device)
-
     return x
 
 
@@ -123,7 +123,6 @@ def unbatchify(x, env):
     """Converts np array to PZ style arguments."""
     x = x.cpu().numpy()
     x = {a: x[i] for i, a in enumerate(env.possible_agents)}
-
     return x
 
 
@@ -158,21 +157,28 @@ if __name__ == "__main__":
     # run on M2 chip for development; cuda for training
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "mps")
 
-    # ENV setup
+    # ENV setup - skip helper wrappers like colour reduction, frame stack on atari envs for now
     envs = MeltingPotCompatibilityV0(
         substrate_name=args.env_id, render_mode="rgb_array"
     )
-    num_agents = envs.max_num_agents
+    num_agents = envs._num_players
+    envs = ss.pettingzoo_env_to_vec_env_v1(envs)
+    envs = ss.concat_vec_envs_v1(
+        envs,
+        num_vec_envs=1,
+        num_cpus=0,
+        base_class="gymnasium",
+    )
     # all agents have the same obs & action space in substrates we run on
-    envs.single_observation_space = envs.observation_space(0)["RGB"]
-    envs.single_action_space = envs.action_space(0)
+    envs.single_observation_space = envs.observation_space["RGB"]  # if vec env
+    envs.single_action_space = envs.action_space  # if vec env
+
     # envs = gym.wrappers.RecordEpisodeStatistics(envs)
     # envs = RecordMultiagentEpisodeStatistics(envs, args.num_steps)
-
     if args.capture_video:
         envs = gym.wrappers.RecordVideo(envs, f"videos/{run_name}")
 
-    agents = MultiAgents(envs).to(device)
+    agents = MultiAgents(envs, num_agents).to(device)
     optimizer = optim.Adam(agents.parameters(), lr=args.learning_rate, eps=1e-5)
     print(agents)
 
@@ -196,7 +202,7 @@ if __name__ == "__main__":
     start_time = time.time()
     next_obs, _info = envs.reset()  # seeding not need as Melting Pot is non-determistic
     # TODO: need other obs as well
-    next_obs = batchify_obs(next_obs, "RGB", device)
+    next_obs = torch.Tensor(next_obs["RGB"]).to(device)
     next_termination = torch.zeros(num_agents).to(device)
     next_truncation = torch.zeros(num_agents).to(device)
     num_updates = args.total_timesteps // args.batch_size
@@ -228,13 +234,14 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data
             next_obs, reward, termination, truncation, info = envs.step(
-                unbatchify(action, envs)
+                action.cpu().numpy()
             )
+
             # (16, )
-            rewards[step] = batchify(reward, device)
-            next_termination = batchify(termination, device).float()
-            next_truncation = batchify(truncation, device).float()
-            next_obs = batchify_obs(next_obs, "RGB", device)
+            rewards[step] = torch.tensor(reward).to(device)
+            next_termination = torch.tensor(next_termination).to(device)
+            next_truncation = torch.tensor(next_truncation).to(device)
+            next_obs = torch.Tensor(next_obs["RGB"]).to(device)
 
             # for idx, item in enumerate(info):
             #     player_idx = idx % num_agents
@@ -331,15 +338,15 @@ if __name__ == "__main__":
                 mb_inds = b_inds[start:end]
 
                 _, newlogprob, entropy, newvalue = agents.get_actions_and_values(
-                    # (128, 16, 88, 88, 3); (128, 16)
+                    # (B, 16, 88, 88, 3); (B, 16)
                     b_obs[mb_inds],
                     b_actions.long()[mb_inds],
                 )
+                # dealing with (B, 16) onwards here instead of the flattened batch dim like used to
                 newlogprob = newlogprob.reshape(-1, num_agents)
                 newvalue = newvalue.reshape(-1, num_agents)
                 entropy = entropy.reshape(-1, num_agents)
-                # we are dealing with (128, 16) onwards here instead of the flattened batch dim like used to
-                # loss should be a (16,) instead of scalar
+
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 

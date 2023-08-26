@@ -63,7 +63,7 @@ def parse_args():
         help="the target KL divergence threshold")
 
     args = parser.parse_args()
-    args.batch_size = int(args.num_envs * args.num_steps) # 1 * 512
-    args.minibatch_size = int(args.batch_size // args.num_minibatches) # 512 / 4 = 128
+    args.batch_size = int(args.num_envs * args.num_steps) # 1 * 128
+    args.minibatch_size = int(args.batch_size // args.num_minibatches) # 128 / 4 = 32
     # fmt: on
     return args
