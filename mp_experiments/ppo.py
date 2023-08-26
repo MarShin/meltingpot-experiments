@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
 from shimmy import MeltingPotCompatibilityV0
 from default_args import parse_args
 
@@ -42,16 +41,16 @@ class Agent(nn.Module):
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def get_value(self, x):
-        # x here is obs: (88, 88, 3)
+        # x here is obs: (B, 88, 88, 3)
         # Convert to tensor, rescale to [0, 1]
         x = (x - 10.0) / (255.0 - 10.0)
         #   B x H x W x C to B x C x H x W
-        return self.critic(self.network(x.permute((2, 0, 1)).unsqueeze(0)))
+        return self.critic(self.network(x.permute(0, 3, 1, 2)))
 
     def get_action_and_value(self, x, action=None):
-        # x here is [88, 88, 3]
+        # x here is [B, 88, 88, 3]
         x = (x - 10.0) / (255.0 - 10.0)
-        hidden = self.network(x.permute((2, 0, 1)).unsqueeze(0))
+        hidden = self.network(x.permute(0, 3, 1, 2))
         logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:
@@ -70,18 +69,26 @@ class MultiAgents(nn.Module):
 
     def get_values(self, x):
         # x herer is obs: (16, 88, 88, 3)
-        values = np.stack(
-            [[self.networks[a].get_value(x[a])] for a in range(self.num_agents)], axis=0
-        )
+        values = [
+            self.networks[a].get_value(x[a].unsqueeze(0))
+            for a in range(self.num_agents)
+        ]
+        values = torch.cat(values, dim=0)
         return values
 
-    def get_actions_and_values(self, x, actions=None):
-        # x herer is obs: (16, 88, 88, 3)
+    def get_actions_and_values(self, x, given_actions=None):
         actions, log_probs, entropies, values = [], [], [], []
         for a in range(self.num_agents):
-            action, log_prob, entropy, value = self.networks[a].get_action_and_value(
-                x[a]
-            )
+            if given_actions is None:
+                # x herer is obs: (1, 16, 88, 88, 3) -> (1)
+                action, log_prob, entropy, value = self.networks[
+                    a
+                ].get_action_and_value(x[:, a])
+            else:
+                # x herer is obs: (128, 16, 88, 88, 3), given_actions (128, 16) -> (128)
+                action, log_prob, entropy, value = self.networks[
+                    a
+                ].get_action_and_value(x[:, a], action=given_actions[:, a])
             actions.append(action)
             log_probs.append(log_prob)
             entropies.append(entropy)
@@ -104,7 +111,8 @@ def batchify_obs(obs, obs_key, device):
 def batchify(x, device):
     """Converts PZ style returns to batch of torch arrays."""
     # convert to list of np arrays
-    x = np.stack([x[a] for a in x], axis=0)
+    assert len(x) == num_agents, "batchify returns len do not match num_agents"
+    x = np.stack([x[a] for a in x], axis=0, dtype=np.float32)
     # convert to torch
     x = torch.tensor(x).to(device)
 
@@ -148,7 +156,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     # run on M2 chip for development; cuda for training
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "mps")
 
     # ENV setup
     envs = MeltingPotCompatibilityV0(
@@ -211,7 +219,9 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agents.get_actions_and_values(next_obs)
+                action, logprob, _, value = agents.get_actions_and_values(
+                    next_obs.unsqueeze(0)
+                )
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -220,60 +230,60 @@ if __name__ == "__main__":
             next_obs, reward, termination, truncation, info = envs.step(
                 unbatchify(action, envs)
             )
-            # rewards[step] = torch.tensor(reward).to(device).view(-1)  # (16, )
+            # (16, )
             rewards[step] = batchify(reward, device)
-            next_termination = batchify(termination, device)
-            next_truncation = batchify(truncation, device)
+            next_termination = batchify(termination, device).float()
+            next_truncation = batchify(truncation, device).float()
             next_obs = batchify_obs(next_obs, "RGB", device)
 
-            for idx, item in enumerate(info):
-                player_idx = idx % num_agents
-                if "episode" in item.keys():
-                    print(
-                        f"global_step={global_step}, {player_idx}-episodic_return={item['episode']['r']}"
-                    )
-                    writer.add_scalar(
-                        f"charts/episodic_return-player{player_idx}",
-                        item["episode"]["r"],
-                        global_step,
-                    )
+            # for idx, item in enumerate(info):
+            #     player_idx = idx % num_agents
+            #     if "episode" in item.keys():
+            #         print(
+            #             f"global_step={global_step}, {player_idx}-episodic_return={item['episode']['r']}"
+            #         )
+            #         writer.add_scalar(
+            #             f"charts/episodic_return-player{player_idx}",
+            #             item["episode"]["r"],
+            #             global_step,
+            #         )
 
-            # TODO: episode-wide info - modify MA_episode_stats wrapper then update this
-            if "ma_episode" in info[0].keys():
-                print(
-                    f"global_step={global_step}, multiagent-max_length={info[0]['ma_episode']['l']}"
-                )
-                print(
-                    f"global_step={global_step}, multiagent-episodic_efficiency={info[0]['ma_episode']['u']}"
-                )
-                print(
-                    f"global_step={global_step}, multiagent-episodic_equality={info[0]['ma_episode']['e']}"
-                )
-                print(
-                    f"global_step={global_step}, multiagent-episodic_sustainability={info[0]['ma_episode']['s']}"
-                )
-                writer.add_scalar(
-                    f"charts/episodic_max_length",
-                    info[0]["ma_episode"]["l"],
-                    global_step,
-                )
-                writer.add_scalar(
-                    f"charts/episodic_efficiency",
-                    info[0]["ma_episode"]["u"],
-                    global_step,
-                )
-                writer.add_scalar(
-                    f"charts/episodic_equality",
-                    info[0]["ma_episode"]["e"],
-                    global_step,
-                )
-                writer.add_scalar(
-                    f"charts/episodic_sustainability",
-                    info[0]["ma_episode"]["s"],
-                    global_step,
-                )
+            # # TODO: episode-wide info - modify MA_episode_stats wrapper then update this
+            # if "ma_episode" in info[0].keys():
+            # print(
+            #     f"global_step={global_step}, multiagent-max_length={info[0]['ma_episode']['l']}"
+            # )
+            # print(
+            #     f"global_step={global_step}, multiagent-episodic_efficiency={info[0]['ma_episode']['u']}"
+            # )
+            # print(
+            #     f"global_step={global_step}, multiagent-episodic_equality={info[0]['ma_episode']['e']}"
+            # )
+            # print(
+            #     f"global_step={global_step}, multiagent-episodic_sustainability={info[0]['ma_episode']['s']}"
+            # )
+            # writer.add_scalar(
+            #     f"charts/episodic_max_length",
+            #     info[0]["ma_episode"]["l"],
+            #     global_step,
+            # )
+            # writer.add_scalar(
+            #     f"charts/episodic_efficiency",
+            #     info[0]["ma_episode"]["u"],
+            #     global_step,
+            # )
+            # writer.add_scalar(
+            #     f"charts/episodic_equality",
+            #     info[0]["ma_episode"]["e"],
+            #     global_step,
+            # )
+            # writer.add_scalar(
+            #     f"charts/episodic_sustainability",
+            #     info[0]["ma_episode"]["s"],
+            #     global_step,
+            # )
 
-        # bootstrap value if not done - REVISIT CODE
+        # bootstrap value if not done
         with torch.no_grad():
             next_value = agents.get_values(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
@@ -296,14 +306,22 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
-        b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
-        b_values = values.reshape(-1)
+        # b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        # b_logprobs = logprobs.reshape(-1)
+        # b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        # b_advantages = advantages.reshape(-1)
+        # b_returns = returns.reshape(-1)
+        # b_values = values.reshape(-1)
 
-        # Optimizing the policy and value networks
+        # for each agent decentralized obs & actions to learn, no need to flatten, all (batch, num_agents)
+        b_obs = obs
+        b_logprobs = logprobs
+        b_actions = actions
+        b_advantages = advantages
+        b_returns = returns
+        b_values = values
+
+        # Optimizing the policy and value networks for each agent:
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
@@ -312,9 +330,16 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
-                    b_obs[mb_inds], b_actions.long()[mb_inds]
+                _, newlogprob, entropy, newvalue = agents.get_actions_and_values(
+                    # (128, 16, 88, 88, 3); (128, 16)
+                    b_obs[mb_inds],
+                    b_actions.long()[mb_inds],
                 )
+                newlogprob = newlogprob.reshape(-1, num_agents)
+                newvalue = newvalue.reshape(-1, num_agents)
+                entropy = entropy.reshape(-1, num_agents)
+                # we are dealing with (128, 16) onwards here instead of the flattened batch dim like used to
+                # loss should be a (16,) instead of scalar
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -340,7 +365,7 @@ if __name__ == "__main__":
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
-                newvalue = newvalue.view(-1)
+                # newvalue = newvalue.view(-1)
                 if args.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
                     v_clipped = b_values[mb_inds] + torch.clamp(
@@ -359,7 +384,7 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(agents.parameters(), args.max_grad_norm)
                 optimizer.step()
 
             # KL divergence early stopping
