@@ -109,11 +109,10 @@ if __name__ == "__main__":
     if args.track:
         import wandb
 
-        wandb.tensorboard.patch(root_logdir=os.getcwd(), pytorch=True)
+        wandb.tensorboard.patch(root_logdir=f"results/{run_name}", pytorch=True)
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            sync_tensorboard=True,
             config=vars(args),
             name=run_name,
             monitor_gym=True,
@@ -375,22 +374,21 @@ if __name__ == "__main__":
         explained_var = (
             np.nan if (var_y == 0).all() else 1.0 - np.var(y_true - y_pred, axis=0) / var_y
         )
-        agent_explained_vars = {a: explained_var[i] for i, a in enumerate(possible_agents)}
+        # agent_explained_vars = {a: explained_var[i] for i, a in enumerate(possible_agents)}
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        writer.add_scalars("losses/value_loss", unbatchify(v_loss, possible_agents), global_step)
-        writer.add_scalars("losses/policy_loss", unbatchify(pg_loss, possible_agents), global_step)
-        writer.add_scalars("losses/entropy", unbatchify(entropy_loss, possible_agents), global_step)
-        writer.add_scalars(
-            "losses/old_approx_kl",
-            unbatchify(old_approx_kl, possible_agents),
-            global_step,
-        )
-        writer.add_scalars("losses/approx_kl", unbatchify(approx_kl, possible_agents), global_step)
-        writer.add_scalars(
-            "losses/clipfrac", unbatchify(agent_clipfracs, possible_agents), global_step
-        )
-        writer.add_scalars("losses/explained_variance", agent_explained_vars, global_step)
+        for i, agent in enumerate(possible_agents):
+            writer.add_scalar(f"losses/value_loss/{agent}", v_loss[i], global_step)
+            writer.add_scalar(f"losses/policy_loss/{agent}", pg_loss[i], global_step)
+            writer.add_scalar(f"losses/entropy/{agent}", entropy_loss[i], global_step)
+            writer.add_scalar(
+                f"losses/old_approx_kl/{agent}",
+                old_approx_kl[i],
+                global_step,
+            )
+            writer.add_scalar(f"losses/approx_kl/{agent}", approx_kl[i], global_step)
+            writer.add_scalar(f"losses/clipfrac/{agent}", agent_clipfracs[i], global_step)
+            writer.add_scalar(f"losses/explained_variance/{agent}", explained_var[i], global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
