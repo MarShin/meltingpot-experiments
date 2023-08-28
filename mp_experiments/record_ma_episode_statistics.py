@@ -22,12 +22,13 @@ class RecordMultiagentEpisodeStatistics(gym.Wrapper):
         self.num_agents = num_agents
         self.is_vector_env = getattr(env, "is_vector_env", False)
         self.t0 = time.perf_counter()
-        self.episode_count = 0
-        self.episode_returns = None
-        self.episode_lengths = None
+
+        self.episode_returns = None  # cumsum of rewards so far in an episode
+        self.episode_lengths = None  # all agents have the same length?
         self.zap_counts = None
         self.sustainability_t_i = None
 
+        # 'COLLECTIVE_REWARD' at the timestep - ref to CollectiveRewardWrapper in `Substrate`
         self.episode_efficiency = None
         self.episode_equality = None
         self.episode_sustainability = None
@@ -63,52 +64,51 @@ class RecordMultiagentEpisodeStatistics(gym.Wrapper):
             infos,
         ) = self.env.step(action)
 
-        # self.episode_returns += rewards
-        # self.sustainability_t_i += (rewards > 0.0).sum()
-        # self.episode_lengths += 1
+        # NOTE: Assuming agents start & end episode together all the time
+        if terminations.sum() != 0 and terminations.sum() != self.num_agents:
+            print("#### Individual agent termination: ", terminations)
+        if truncations.sum() != 0 and truncations.sum() != self.num_agents:
+            print("#### Individual agent truncations: ", truncations)
+        dones = np.maximum(truncations, terminations)
+        self.episode_lengths += 1 - dones
 
-        # # only using the last of the stacked frames; any of the vec env same values; remove the padding
-        # who_zapped_who = observations[:, :, :, -1][0][:16, :16]
-        # self.zap_counts += who_zapped_who.sum()
+        self.episode_returns += rewards
+        self.sustainability_t_i += (rewards > 0.0).sum()
 
-        # assert (
-        #     self.is_vector_env == True
-        # ), "this wrapper currently only works with vector env"
+        # only using the last of the stacked frames; any of the vec env same values; remove the padding
+        if "WHO_ZAPPED_WHO" in observations.keys():
+            who_zapped_who = observations["WHO_ZAPPED_WHO"]  # (num_agents, num_agents)
+            self.zap_counts += who_zapped_who.sum()
+        else:
+            who_zapped_who = np.zeros((self.num_agents, self.num_agents), dtype=np.int32)
 
-        # infos = list(infos)  # Convert infos to mutable type
-        # # aggregating each agent
+        # if all agent have finished then report the metrics
+        # only report on 1st agent to save redundant work in vec env setting
+        if dones.all():
+            print("Episode lengths: ", self.episode_lengths)
+            # infos[i] = infos[i].copy()
+            self.episode_efficiency = self.episode_returns.sum() / self.episode_lengths.max()
+            self.episode_equality = 1 - self._gini_coefficient(self.episode_returns)
+            self.episode_sustainability = self.sustainability_t_i / self.num_agents
+            self.episode_peace = (
+                self.num_agents * self.episode_lengths.max() - self.zap_counts
+            ) / self.episode_lengths.max()
 
-        # # if all agent have finished the episode then report the metrics
-        # if dones.all():
-        #     for i in range(len(dones)):
-        #         infos[i] = infos[i].copy()
+            episode_info = {
+                "l": self.episode_lengths.max(),
+                "u": self.episode_efficiency,
+                "e": self.episode_equality,
+                "s": self.episode_sustainability,
+                "p": self.episode_peace,
+                "t": round(time.perf_counter() - self.t0, 6),
+            }
+            infos[0]["ma_episode"] = episode_info
 
-        #         self.episode_efficiency = (
-        #             self.episode_returns.sum() / self.episode_lengths.max()
-        #         )
-        #         self.episode_equality = 1 - self._gini_coefficient(self.episode_returns)
-        #         self.episode_sustainability = self.sustainability_t_i / self.num_agents
-        #         self.episode_peace = (
-        #             self.num_agents * self.episode_lengths.max() - self.zap_counts
-        #         ) / self.episode_lengths.max()
+            self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
+            self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
 
-        #         episode_info = {
-        #             "l": self.episode_lengths.max(),
-        #             "u": self.episode_efficiency,
-        #             "e": self.episode_equality,
-        #             "s": self.episode_sustainability,
-        #             "p": self.episode_peace,
-        #             "t": round(time.perf_counter() - self.t0, 6),
-        #         }
-        #         infos[i]["ma_episode"] = episode_info
-        #     self.episode_count += 1
-        #     self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
-        #     self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
-        #     self.sustainability_t_i = 0
-        #     self.zap_counts = 0
         # if self.is_vector_env:
         #     infos = tuple(infos)
-
         return (
             observations,
             rewards,

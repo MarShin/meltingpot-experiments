@@ -295,40 +295,44 @@ if __name__ == "__main__":
             #             global_step,
             #         )
 
-            # # TODO: episode-wide info - modify MA_episode_stats wrapper then update this
-            # if "ma_episode" in info[0].keys():
-            # print(
-            #     f"global_step={global_step}, multiagent-max_length={info[0]['ma_episode']['l']}"
-            # )
-            # print(
-            #     f"global_step={global_step}, multiagent-episodic_efficiency={info[0]['ma_episode']['u']}"
-            # )
-            # print(
-            #     f"global_step={global_step}, multiagent-episodic_equality={info[0]['ma_episode']['e']}"
-            # )
-            # print(
-            #     f"global_step={global_step}, multiagent-episodic_sustainability={info[0]['ma_episode']['s']}"
-            # )
-            # writer.add_scalar(
-            #     f"charts/episodic_max_length",
-            #     info[0]["ma_episode"]["l"],
-            #     global_step,
-            # )
-            # writer.add_scalar(
-            #     f"charts/episodic_efficiency",
-            #     info[0]["ma_episode"]["u"],
-            #     global_step,
-            # )
-            # writer.add_scalar(
-            #     f"charts/episodic_equality",
-            #     info[0]["ma_episode"]["e"],
-            #     global_step,
-            # )
-            # writer.add_scalar(
-            #     f"charts/episodic_sustainability",
-            #     info[0]["ma_episode"]["s"],
-            #     global_step,
-            # )
+            if "ma_episode" in info[0].keys():
+                print(
+                    f"global_step={global_step}, episodic_max_length={info[0]['ma_episode']['l']}"
+                )
+                print(
+                    f"global_step={global_step}, episodic_efficiency={info[0]['ma_episode']['u']}"
+                )
+                print(f"global_step={global_step}, episodic_equality={info[0]['ma_episode']['e']}")
+                print(
+                    f"global_step={global_step}, episodic_sustainability={info[0]['ma_episode']['s']}"
+                )
+                print(f"global_step={global_step}, episodic_peace={info[0]['ma_episode']['s']}")
+                if args.track:
+                    writer.add_scalar(
+                        f"charts/episodic_max_length",
+                        info[0]["ma_episode"]["l"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        f"charts/episodic_efficiency",
+                        info[0]["ma_episode"]["u"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        f"charts/episodic_equality",
+                        info[0]["ma_episode"]["e"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        f"charts/episodic_sustainability",
+                        info[0]["ma_episode"]["s"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        f"charts/episodic_peace",
+                        info[0]["ma_episode"]["p"],
+                        global_step,
+                    )
 
         # bootstrap value if not done
         with torch.no_grad():
