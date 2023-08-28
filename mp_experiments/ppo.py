@@ -13,9 +13,81 @@ from shimmy import MeltingPotCompatibilityV0
 import supersuit as ss
 from default_args import parse_args
 
-# from record_ma_episode_statistics import (
-#     RecordMultiagentEpisodeStatistics,
-# )
+from record_ma_episode_statistics import (
+    RecordMultiagentEpisodeStatistics,
+)
+
+
+class RecordEpisodeStatistics(gym.Wrapper):
+    def __init__(self, env, deque_size=100):
+        super().__init__(env)
+        self.num_envs = getattr(env, "num_envs", 1)
+        self.episode_returns = None
+        self.episode_lengths = None
+
+    def reset(self, **kwargs):
+        observations = super().reset(**kwargs)
+        self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
+        self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
+        self.lives = np.zeros(self.num_envs, dtype=np.int32)
+        self.returned_episode_returns = np.zeros(self.num_envs, dtype=np.float32)
+        self.returned_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
+        return observations
+
+    def step(self, action):
+        observations, rewards, dones, infos = super().step(action)
+        self.episode_returns += infos["reward"]
+        self.episode_lengths += 1
+        self.returned_episode_returns[:] = self.episode_returns
+        self.returned_episode_lengths[:] = self.episode_lengths
+        self.episode_returns *= 1 - infos["terminated"]
+        self.episode_lengths *= 1 - infos["terminated"]
+        infos["r"] = self.returned_episode_returns
+        infos["l"] = self.returned_episode_lengths
+        return (
+            observations,
+            rewards,
+            dones,
+            infos,
+        )
+
+
+class RecordEpisodeStatisticsTorch(gym.Wrapper):
+    def __init__(self, env, device):
+        super().__init__(env)
+        self.num_envs = getattr(env, "num_envs", 1)
+        self.device = device
+        self.episode_returns = None
+        self.episode_lengths = None
+
+    def reset(self, **kwargs):
+        observations = super().reset(**kwargs)
+        self.episode_returns = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.episode_lengths = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self.returned_episode_returns = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        self.returned_episode_lengths = torch.zeros(
+            self.num_envs, dtype=torch.int32, device=self.device
+        )
+        return observations
+
+    def step(self, action):
+        observations, rewards, dones, infos = super().step(action)
+        self.episode_returns += rewards
+        self.episode_lengths += 1
+        self.returned_episode_returns[:] = self.episode_returns
+        self.returned_episode_lengths[:] = self.episode_lengths
+        self.episode_returns *= 1 - dones
+        self.episode_lengths *= 1 - dones
+        infos["r"] = self.returned_episode_returns
+        infos["l"] = self.returned_episode_lengths
+        return (
+            observations,
+            rewards,
+            dones,
+            infos,
+        )
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -137,7 +209,7 @@ if __name__ == "__main__":
     # ENV setup - skip helper wrappers like colour reduction, frame stack on atari envs for now
     envs = MeltingPotCompatibilityV0(substrate_name=args.env_id, render_mode="rgb_array")
     num_agents = envs._num_players
-    possible_agents = envs.possible_agents
+    possible_agents = envs.possible_agents  # dict
     envs = ss.pettingzoo_env_to_vec_env_v1(envs)
     envs = ss.concat_vec_envs_v1(
         envs,
@@ -149,8 +221,8 @@ if __name__ == "__main__":
     envs.single_observation_space = envs.observation_space["RGB"]  # if vec env
     envs.single_action_space = envs.action_space  # if vec env
     envs.is_vector_env = True
-
-    # envs = RecordMultiagentEpisodeStatistics(envs, args.num_steps)
+    envs.render_mode = "rgb_array"  # supersuit wrapper makes property gone
+    envs = RecordMultiagentEpisodeStatistics(envs, num_agents)
     if args.capture_video:
         envs = gym.wrappers.RecordVideo(envs, f"videos/{run_name}")
 
@@ -374,7 +446,6 @@ if __name__ == "__main__":
         explained_var = (
             np.nan if (var_y == 0).all() else 1.0 - np.var(y_true - y_pred, axis=0) / var_y
         )
-        # agent_explained_vars = {a: explained_var[i] for i, a in enumerate(possible_agents)}
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         for i, agent in enumerate(possible_agents):
