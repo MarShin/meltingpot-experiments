@@ -1,7 +1,4 @@
 import time
-from collections import deque
-from typing import Optional
-
 import numpy as np
 import gymnasium as gym
 
@@ -75,18 +72,17 @@ class RecordMultiagentEpisodeStatistics(gym.Wrapper):
         self.episode_returns += rewards
         self.sustainability_t_i += (rewards > 0.0).sum()
 
-        # only using the last of the stacked frames; any of the vec env same values; remove the padding
         if "WHO_ZAPPED_WHO" in observations.keys():
             who_zapped_who = observations["WHO_ZAPPED_WHO"]  # (num_agents, num_agents)
-            self.zap_counts += who_zapped_who.sum()
         else:
+            # if WHO_ZAPPED_WHO not in observations, assuming it is zeros
             who_zapped_who = np.zeros((self.num_agents, self.num_agents), dtype=np.int32)
+        self.zap_counts += who_zapped_who.sum()
 
         # if all agent have finished then report the metrics
         # only report on 1st agent to save redundant work in vec env setting
         if dones.all():
             print("Episode lengths: ", self.episode_lengths)
-            # infos[i] = infos[i].copy()
             self.episode_efficiency = self.episode_returns.sum() / self.episode_lengths.max()
             self.episode_equality = 1 - self._gini_coefficient(self.episode_returns)
             self.episode_sustainability = self.sustainability_t_i / self.num_agents
@@ -107,8 +103,6 @@ class RecordMultiagentEpisodeStatistics(gym.Wrapper):
             self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
             self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
 
-        # if self.is_vector_env:
-        #     infos = tuple(infos)
         return (
             observations,
             rewards,

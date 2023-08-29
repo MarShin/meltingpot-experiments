@@ -18,78 +18,6 @@ from record_ma_episode_statistics import (
 )
 
 
-class RecordEpisodeStatistics(gym.Wrapper):
-    def __init__(self, env, deque_size=100):
-        super().__init__(env)
-        self.num_envs = getattr(env, "num_envs", 1)
-        self.episode_returns = None
-        self.episode_lengths = None
-
-    def reset(self, **kwargs):
-        observations = super().reset(**kwargs)
-        self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
-        self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
-        self.lives = np.zeros(self.num_envs, dtype=np.int32)
-        self.returned_episode_returns = np.zeros(self.num_envs, dtype=np.float32)
-        self.returned_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
-        return observations
-
-    def step(self, action):
-        observations, rewards, dones, infos = super().step(action)
-        self.episode_returns += infos["reward"]
-        self.episode_lengths += 1
-        self.returned_episode_returns[:] = self.episode_returns
-        self.returned_episode_lengths[:] = self.episode_lengths
-        self.episode_returns *= 1 - infos["terminated"]
-        self.episode_lengths *= 1 - infos["terminated"]
-        infos["r"] = self.returned_episode_returns
-        infos["l"] = self.returned_episode_lengths
-        return (
-            observations,
-            rewards,
-            dones,
-            infos,
-        )
-
-
-class RecordEpisodeStatisticsTorch(gym.Wrapper):
-    def __init__(self, env, device):
-        super().__init__(env)
-        self.num_envs = getattr(env, "num_envs", 1)
-        self.device = device
-        self.episode_returns = None
-        self.episode_lengths = None
-
-    def reset(self, **kwargs):
-        observations = super().reset(**kwargs)
-        self.episode_returns = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self.episode_lengths = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
-        self.returned_episode_returns = torch.zeros(
-            self.num_envs, dtype=torch.float32, device=self.device
-        )
-        self.returned_episode_lengths = torch.zeros(
-            self.num_envs, dtype=torch.int32, device=self.device
-        )
-        return observations
-
-    def step(self, action):
-        observations, rewards, dones, infos = super().step(action)
-        self.episode_returns += rewards
-        self.episode_lengths += 1
-        self.returned_episode_returns[:] = self.episode_returns
-        self.returned_episode_lengths[:] = self.episode_lengths
-        self.episode_returns *= 1 - dones
-        self.episode_lengths *= 1 - dones
-        infos["r"] = self.returned_episode_returns
-        infos["l"] = self.returned_episode_lengths
-        return (
-            observations,
-            rewards,
-            dones,
-            infos,
-        )
-
-
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
@@ -295,6 +223,7 @@ if __name__ == "__main__":
             #             global_step,
             #         )
 
+            # 4 social outcome metrics from RecordMultiagentEpisodeStatistics
             if "ma_episode" in info[0].keys():
                 print(
                     f"global_step={global_step}, episodic_max_length={info[0]['ma_episode']['l']}"
