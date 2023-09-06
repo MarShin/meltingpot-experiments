@@ -52,7 +52,7 @@ class RecordMultiagentEpisodeStatistics(gym.Wrapper):
 
     # can return 1 episode info dict aggregating all the metrics of each agent
     def step(self, action):
-        # (num_agents, )
+        # shape (num_agents, )
         (
             observations,
             rewards,
